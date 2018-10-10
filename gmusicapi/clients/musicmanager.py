@@ -5,6 +5,7 @@ from future.utils import PY3
 from past.builtins import basestring
 from builtins import *  # noqa
 
+import base64
 import os
 from socket import gethostname
 import time
@@ -17,6 +18,7 @@ else:
     from urllib import unquote
 
 import httplib2  # included with oauth2client
+import mutagen
 from oauth2client.client import OAuth2WebServerFlow, TokenRevokeError
 import oauth2client.file
 
@@ -48,6 +50,7 @@ class Musicmanager(_Base):
     """
 
     _session_class = session.Musicmanager
+    print('**** !!! bt - Musicmanager patched !!! ****')
 
     @staticmethod
     def perform_oauth(storage_filepath=OAUTH_FILEPATH, open_browser=False):
@@ -403,7 +406,8 @@ class Musicmanager(_Base):
     @utils.accept_singleton(basestring)
     @utils.empty_arg_shortcircuit(return_code='{}')
     def upload(self, filepaths, enable_matching=False,
-               enable_transcoding=True, transcode_quality='320k'):
+               enable_transcoding=True, transcode_quality='320k',
+               include_album_art=True):
         """Uploads the given filepaths.
 
         All non-mp3 files will be transcoded before being uploaded.
@@ -446,6 +450,10 @@ class Musicmanager(_Base):
           <http://trac.ffmpeg.org/wiki/Encoding%20VBR%20(Variable%20Bit%20Rate)%20mp3%20audio>`__).
           If string, pass to ffmpeg/avconv ``-b:a`` (eg ``'128k'`` for an average bitrate of 128k).
           The default is 320kbps cbr (the highest possible quality).
+
+        :param include_album_art: If ``False``, do not upload embedded album art.
+          If string, upload external album art at given filepath.
+          Google Music supports GIF, JPEG, and PNG image formats.
 
         All Google-supported filetypes are supported; see `Google's documentation
         <http://support.google.com/googleplay/bin/answer.py?hl=en&answer=1100462>`__.
@@ -513,10 +521,70 @@ class Musicmanager(_Base):
             if not enable_matching:
                 bogus_sample = b''  # just send empty bytes
 
+            album_art_image = None
+            if include_album_art:
+                if include_album_art is True:  # Load embedded album art.
+                    song = mutagen.File(path)
+                    if isinstance(song, (mutagen.mp3.MP3)):
+                        # Search through all the APIC frames to find the cover (type 3).
+                        for pic in song.tags.getall('APIC'):
+                            if pic.type == 3:
+                                album_art_image = pic.data
+                    elif isinstance(song, mutagen.flac.FLAC):
+                        # Search through all the picture frames to find the cover (type 3).
+                        for pic in song.pictures:
+                            if pic.type == 3:
+                                album_art_image = pic.data
+                                break
+                    elif isinstance(song, mutagen.mp4.MP4):
+                        if 'covr' in song:
+                            album_art_image = song['covr'][0]
+                    elif isinstance(song, mutagen.asf.ASF):
+                        if 'WM/Picture' in song:
+                            # Search through all the WM/Picture frames to find the cover (type 3).
+                            for pic in song['WM/Picture']:
+                                data = bytes(pic)
+                                if data[0] == 3:
+                                    # Parse out the image data according to the WM_PICTURE spec:
+                                    # 1 byte type + 4 bytes data length + null-terminated mime +
+                                    # null-terminated description + data
+                                    pos = 5
+                                    while data[pos:pos + 2] != b"\x00\x00":
+                                        pos += 2
+                                    pos += 2
+                                    while data[pos:pos + 2] != b"\x00\x00":
+                                        pos += 2
+                                    
+                                    album_art_image = data[pos + 2:]
+                                    break
+                    elif isinstance(song, mutagen.oggvorbis.OggVorbis):
+                        if 'metadata_block_picture' in song:
+                            # Search through all the picture frames to find the cover (type 3).
+                            for pic in song['metadata_block_picture']:
+                                # Mutagen does not parse out the picture fields to attributes
+                                # like with FLAC, so we use the FLAC Picture class to do so.
+                                # Picture blocks are base64 encoded in Ogg Vorbis.
+                                picture = mutagen.flac.Picture(base64.b64decode(pic))
+                                
+                                if picture.type == 3:
+                                    album_art_image = picture.data
+                                    break
+                else:  # Load external album art.
+                    try:
+                        with open(include_album_art, 'rb') as f:
+                            album_art_image = f.read()
+                    except OSError:
+                        self.logger.warning(
+                            "Image file: %r cannot be read. Uploading %r without album art.",
+                            include_album_art, path
+                        )
+
+
             try:
                 res = self._make_call(musicmanager.ProvideSample,
                                       path, sample_request, track,
-                                      self.uploader_id, bogus_sample)
+                                      self.uploader_id, bogus_sample,
+                                      album_art_image)
 
             except (IOError, ValueError) as e:
                 self.logger.warning("couldn't create scan and match sample for '%r': %s",

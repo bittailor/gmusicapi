@@ -534,7 +534,7 @@ class ProvideSample(MmCall):
 
     @staticmethod
     @pb
-    def dynamic_data(filepath, server_challenge, track, uploader_id, mock_sample=None):
+    def dynamic_data(filepath, server_challenge, track, uploader_id, mock_sample=None, album_art_image=None):
         """Raise IOError on transcoding problems, or ValueError for invalid input.
 
         :param mock_sample: if provided, will be sent in place of a proper sample
@@ -560,6 +560,11 @@ class ProvideSample(MmCall):
             )
         else:
             sample_msg.sample = mock_sample
+
+        if album_art_image:
+            album_art = upload_pb2.ImageUnion()
+            album_art.user_album_art = album_art_image
+            sample_msg.user_album_art.CopyFrom(album_art)
 
         # You can provide multiple samples; I just provide one at a time.
         msg.track_sample.extend([sample_msg])
